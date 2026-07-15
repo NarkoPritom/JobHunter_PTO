@@ -1,6 +1,8 @@
+"""
+SuperJob API client. Optional — only active if SUPERJOB_API_KEY is set in .env.
+Docs: https://api.superjob.ru/
+"""
 from __future__ import annotations
-
-import json
 
 import httpx
 import structlog
@@ -9,43 +11,41 @@ from app.config.settings import settings
 
 logger = structlog.get_logger(__name__)
 
-ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
+SJ_BASE_URL = "https://api.superjob.ru/2.0"
 
 
-class LLMClient:
-    """Thin wrapper around the Anthropic Messages API."""
-
+class SuperJobClient:
     def __init__(self) -> None:
-        self._client = httpx.AsyncClient(
-            headers={
-                "x-api-key": settings.anthropic_api_key,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json",
-            },
-            timeout=60.0,
-        )
+        self.enabled = bool(settings.superjob_api_key)
+        self._client = httpx.AsyncClient(base_url=SJ_BASE_URL, timeout=20.0)
 
     async def close(self) -> None:
         await self._client.aclose()
 
-    async def complete(self, system: str, user: str, max_tokens: int = 1000) -> str:
-        payload = {
-            "model": settings.anthropic_model,
-            "max_tokens": max_tokens,
-            "system": system,
-            "messages": [{"role": "user", "content": user}],
-        }
-        resp = await self._client.post(ANTHROPIC_API_URL, json=payload)
-        resp.raise_for_status()
-        data = resp.json()
-        text_blocks = [b["text"] for b in data.get("content", []) if b.get("type") == "text"]
-        return "\n".join(text_blocks)
+    async def search_vacancies(self, keyword: str, town: str | None = None, payment_from: int | None = None) -> list[dict]:
+        if not self.enabled:
+            return []
 
-    async def complete_json(self, system: str, user: str, max_tokens: int = 1000) -> dict:
-        raw = await self.complete(system, user, max_tokens=max_tokens)
-        cleaned = raw.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+        headers = {"X-Api-App-Id": settings.superjob_api_key}
+        params: dict = {"keyword": keyword, "count": 50}
+        if town:
+            params["town"] = town
+        if payment_from:
+            params["payment_from"] = payment_from
+
         try:
-            return json.loads(cleaned)
-        except json.JSONDecodeError:
-            logger.error("llm_json_parse_failed", raw=raw)
-            return {}
+            resp = await self._client.get("/vacancies/", headers=headers, params=params)
+            resp.raise_for_status()
+            return resp.json().get("objects", [])
+        except httpx.HTTPError as exc:
+            logger.error("superjob_search_failed", error=str(exc))
+            return []
+
+
+# NOTE on Avito Работа:
+# Avito has no official public jobs API. Scraping their site programmatically
+# is against their Terms of Service, so no scraper is included here. If you
+# still want Avito listings, the safest approach is to manually browse and
+# forward interesting links to yourself — this bot's LLM analyzer can still
+# score/write a cover letter for a manually-pasted vacancy description
+# (see app/llm/analyzer.py — it works on raw text, not just API results).
